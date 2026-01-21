@@ -1,31 +1,27 @@
 Bot Tich Xanh
 =============
 
-Lightweight "blue check" bot for managing verification requests.
-Single-file CLI stored in `bot.py` with JSON storage.
+Single-file Telegram bot stored in `bot.py`.
+The bot checks Facebook page verification (tích xanh) using cookies
+and supports quick check + auto watch (30–60s).
 
 Features
 --------
-- Create verification requests
-- Approve or reject requests
-- Check status for a user
-- List requests by status
+- Check nhanh (1 lần)
+- Theo dõi tự động, báo khi có tích
+- Quản lý user và cookie (admin)
 
 Quick start
 -----------
-1) Create a request:
-   python bot.py request alice "Alice Example" "Public figure"
+1) Set environment variables:
+   export TELEGRAM_BOT_TOKEN="YOUR_TOKEN"
+   export BOT_ADMIN_IDS="123456789"
 
-2) Approve a request:
-   python bot.py approve alice --by admin --reason "Verified identity"
-
-3) Check status:
-   python bot.py status alice
-
-4) List pending requests:
-   python bot.py list --status pending
+2) Run the bot:
+   python bot.py
 
 State file
 ----------
-The default state file is: data/requests.json
-You can override it with --state.
+The bot stores state in: data/state.json
+You can override it with:
+   export BOT_STATE_PATH="/path/to/state.json"
