@@ -595,10 +595,11 @@ def format_watch_expired(watch: Dict[str, Any]) -> str:
 
 
 def format_watch_list(watches: List[Dict[str, Any]], is_admin: bool) -> str:
-    if not watches:
+    active = [w for w in watches if w.get("status") == "watching"]
+    if not active:
         return "📋 DANH SÁCH THEO DÕI\nKhông có kèo nào."
-    lines = [f"📋 DANH SÁCH THEO DÕI ({len(watches)})"]
-    for idx, watch in enumerate(watches[:10], start=1):
+    lines = [f"📋 DANH SÁCH THEO DÕI ({len(active)})"]
+    for idx, watch in enumerate(active[:10], start=1):
         name = watch.get("page_name") or "Không rõ"
         next_check = watch.get("next_check_at")
         next_str = format_time(next_check) if next_check else "Chưa rõ"
@@ -611,7 +612,7 @@ def format_watch_list(watches: List[Dict[str, Any]], is_admin: bool) -> str:
         lines.append(f"   🆔 Mã: {watch.get('id')}")
         lines.append(f"   ⏭ Check tiếp: {next_str}")
         lines.append(f"   🔗 {watch.get('page_url')}")
-    if len(watches) > 10:
+    if len(active) > 10:
         lines.append("... (còn nữa, hãy lọc hoặc hủy bớt)")
     lines.append("👉 Gõ: HUY <Mã> để hủy theo dõi.")
     return "\n".join(lines)
@@ -873,8 +874,11 @@ def handle_message(
         if step == "cancel_watch":
             watch_id = text.strip()
             watch = store.get_watch(watch_id)
-            if not watch or watch.get("user_id") != user_id:
+            if not watch:
                 client.send_message(chat_id, "❗ Không tìm thấy mã theo dõi.")
+                return
+            if not store.is_admin(user_id) and watch.get("user_id") != user_id:
+                client.send_message(chat_id, "❗ Bạn không có quyền hủy kèo này.")
                 return
             store.update_watch(watch_id, {"status": "cancelled"})
             client.send_message(chat_id, f"✅ Đã hủy theo dõi: {watch_id}")
@@ -936,14 +940,18 @@ def handle_message(
         client.send_message(chat_id, "🔗 Gửi link page Facebook cần kiểm tra.")
         return
 
-    if normalized in {"➕ THEO DÕI", "THEO DOI"}:
+    if normalized in {"➕ THEO DOI", "THEO DOI"}:
         sessions[user_id] = {"step": "watch_link"}
         client.send_message(chat_id, "🔗 Gửi link page Facebook cần theo dõi.")
         return
 
-    if normalized in {"🗂️ DANH SÁCH & HỦY", "DANH SACH & HUY", "DANH SACH"}:
-        watches = store.list_watches(user_id)
-        client.send_message(chat_id, format_watch_list(watches, False))
+    if normalized in {"🗂️ DANH SACH & HUY", "DANH SACH & HUY", "DANH SACH"}:
+        if store.is_admin(user_id):
+            watches = store.list_watches()
+            client.send_message(chat_id, format_watch_list(watches, True))
+        else:
+            watches = store.list_watches(user_id)
+            client.send_message(chat_id, format_watch_list(watches, False))
         return
 
     if normalized.startswith("HUY ") or normalized.startswith("HỦY "):
@@ -953,14 +961,17 @@ def handle_message(
             return
         watch_id = parts[1].strip()
         watch = store.get_watch(watch_id)
-        if not watch or watch.get("user_id") != user_id:
+        if not watch:
             client.send_message(chat_id, "❗ Không tìm thấy mã theo dõi.")
+            return
+        if not store.is_admin(user_id) and watch.get("user_id") != user_id:
+            client.send_message(chat_id, "❗ Bạn không có quyền hủy kèo này.")
             return
         store.update_watch(watch_id, {"status": "cancelled"})
         client.send_message(chat_id, f"✅ Đã hủy theo dõi: {watch_id}")
         return
 
-    if normalized == "⚙️ QUẢN LÝ HỆ THỐNG":
+    if normalized in {"⚙️ QUAN LY HE THONG", "QUAN LY HE THONG"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -969,7 +980,7 @@ def handle_message(
         )
         return
 
-    if normalized == "👥 QUẢN LÝ USER":
+    if normalized in {"👥 QUAN LY USER", "QUAN LY USER"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -978,7 +989,7 @@ def handle_message(
         )
         return
 
-    if normalized == "🍪 QUẢN LÝ COOKIES":
+    if normalized in {"🍪 QUAN LY COOKIES", "QUAN LY COOKIES"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -987,7 +998,7 @@ def handle_message(
         )
         return
 
-    if normalized == "⬅️ QUAY LẠI":
+    if normalized in {"⬅️ QUAY LAI", "QUAY LAI"}:
         client.send_message(
             chat_id,
             "🔙 Quay lại menu chính.",
@@ -995,7 +1006,7 @@ def handle_message(
         )
         return
 
-    if normalized == "➕ THÊM USER":
+    if normalized in {"➕ THEM USER", "THEM USER"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1003,7 +1014,7 @@ def handle_message(
         client.send_message(chat_id, "👤 Nhập Telegram ID của user cần thêm.")
         return
 
-    if normalized == "🗑️ XÓA USER":
+    if normalized in {"🗑️ XOA USER", "XOA USER"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1011,7 +1022,7 @@ def handle_message(
         client.send_message(chat_id, "🗑️ Nhập Telegram ID cần xóa.")
         return
 
-    if normalized == "📋 DANH SÁCH USER":
+    if normalized in {"📋 DANH SACH USER", "DANH SACH USER"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1019,7 +1030,7 @@ def handle_message(
         client.send_message(chat_id, format_user_list(users))
         return
 
-    if normalized == "➕ THÊM COOKIE":
+    if normalized in {"➕ THEM COOKIE", "THEM COOKIE"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1027,7 +1038,7 @@ def handle_message(
         client.send_message(chat_id, "🍪 Đặt tên cho cookie (vd: FB_01).")
         return
 
-    if normalized == "📋 DANH SÁCH COOKIE":
+    if normalized in {"📋 DANH SACH COOKIE", "DANH SACH COOKIE"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1035,7 +1046,7 @@ def handle_message(
         client.send_message(chat_id, format_cookie_list(cookies))
         return
 
-    if normalized == "⛔ VÔ HIỆU":
+    if normalized in {"⛔ VO HIEU", "VO HIEU"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
@@ -1043,7 +1054,7 @@ def handle_message(
         client.send_message(chat_id, "⛔ Nhập cookie ID cần vô hiệu.")
         return
 
-    if normalized == "✅ KÍCH HOẠT":
+    if normalized in {"✅ KICH HOAT", "KICH HOAT"}:
         if not store.is_admin(user_id):
             client.send_message(chat_id, "❗ Bạn không có quyền admin.")
             return
