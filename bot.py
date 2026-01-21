@@ -92,6 +92,8 @@ def http_get(url: str, cookie_value: str) -> Tuple[Optional[str], Optional[str]]
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "identity",
         "Cookie": cookie_value,
     }
     req = request.Request(url, headers=headers, method="GET")
@@ -118,18 +120,36 @@ def extract_title(html: str) -> Optional[str]:
 LOGIN_HINTS = [
     "login.php",
     "log in",
+    "log in or sign up",
+    "sign up",
+    "please log in",
     "đăng nhập",
+    "đăng nhập để xem",
+    "vui lòng đăng nhập",
+    "đăng ký",
+    "đăng ký để xem",
     "m.facebook.com/login",
     "checkpoint",
 ]
 
-PAGE_HINTS = [
-    "people like this",
-    "followers",
-    "người theo dõi",
-    "thích trang",
-    "đang theo dõi",
-    "likes",
+VERIFIED_PATTERNS = [
+    r'"is_verified"\s*:\s*true',
+    r'"verification_status"\s*:\s*"verified"',
+    r"verified badge",
+    r"verified account",
+    r"verified page",
+    r"meta verified",
+    r"trang đã xác minh",
+    r"tài khoản đã xác minh",
+    r"aria-label=\"verified\"",
+    r"aria-label=\"verified account\"",
+    r"aria-label=\"verified page\"",
+    r"aria-label=\"đã xác minh\"",
+]
+
+NOT_VERIFIED_PATTERNS = [
+    r'"is_verified"\s*:\s*false',
+    r'"verification_status"\s*:\s*"(not_verified|unverified)"',
 ]
 
 
@@ -138,24 +158,13 @@ def is_login_wall(html: str) -> bool:
     return any(hint in lower for hint in LOGIN_HINTS)
 
 
-def looks_like_page(html: str) -> bool:
-    lower = html.lower()
-    return any(hint in lower for hint in PAGE_HINTS)
-
-
 def detect_verified(html: str) -> Optional[bool]:
-    if re.search(r'"is_verified"\s*:\s*true', html):
-        return True
-    if re.search(r'"is_verified"\s*:\s*false', html):
-        return False
-    if re.search(r'"verification_status"\s*:\s*"verified"', html):
-        return True
-    if re.search(r'"verification_status"\s*:\s*"(not_verified|unverified)"', html):
-        return False
-    if re.search(r"verified badge", html, re.IGNORECASE):
-        return True
-    if re.search(r"(trang|tài khoản)\s+đã\s+xác\s+minh", html, re.IGNORECASE):
-        return True
+    for pattern in VERIFIED_PATTERNS:
+        if re.search(pattern, html, re.IGNORECASE):
+            return True
+    for pattern in NOT_VERIFIED_PATTERNS:
+        if re.search(pattern, html, re.IGNORECASE):
+            return False
     return None
 
 
@@ -211,12 +220,6 @@ def check_page_with_cookie(page_url: str, cookie_value: str) -> CheckResult:
                 cookie_ok=True,
             )
         if verdict is False:
-            return CheckResult(
-                status="not_verified",
-                page_name=page_name,
-                cookie_ok=True,
-            )
-        if looks_like_page(html):
             return CheckResult(
                 status="not_verified",
                 page_name=page_name,
