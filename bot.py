@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
@@ -37,11 +38,11 @@ USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1").strip().lower() not in (
 )
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
 
     PLAYWRIGHT_AVAILABLE = True
 except Exception:
-    sync_playwright = None
+    async_playwright = None
     PLAYWRIGHT_AVAILABLE = False
 
 DEFAULT_STATE: Dict[str, Any] = {
@@ -294,6 +295,10 @@ class BrowserSession:
         self.playwright = None
         self.browser = None
         self.lock = threading.Lock()
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.thread: Optional[threading.Thread] = None
+        self.ready = threading.Event()
+        self.error: Optional[str] = None
 
     def start(self) -> Optional[str]:
         if not PLAYWRIGHT_AVAILABLE:
@@ -301,49 +306,87 @@ class BrowserSession:
                 "Thiếu Playwright. Cài: pip install playwright "
                 "và python -m playwright install chromium"
             )
-        if self.browser:
-            return None
-        try:
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(headless=True)
-            return None
-        except Exception as exc:
-            self.playwright = None
-            self.browser = None
-            return f"Lỗi Playwright: {exc}"
+        if self.thread and self.thread.is_alive():
+            self.ready.wait(timeout=10)
+            return self.error
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        self.ready.wait(timeout=15)
+        return self.error
 
     def stop(self) -> None:
-        if self.browser:
-            self.browser.close()
-            self.browser = None
-        if self.playwright:
-            self.playwright.stop()
-            self.playwright = None
+        if self.loop and self.loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self._async_stop(), self.loop)
+            try:
+                future.result(timeout=10)
+            except Exception:
+                pass
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+        self.thread = None
+        self.loop = None
 
-    def fetch_html(self, url: str, cookie_value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def fetch_html(
+        self, url: str, cookie_value: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         error = self.start()
         if error:
             return None, error, None
         cookies = parse_cookie_header(cookie_value)
         if not cookies:
             return None, "Cookie trống", None
+        if not self.loop:
+            return None, "Playwright chưa sẵn sàng", None
         with self.lock:
-            context = self.browser.new_context(
-                user_agent=USER_AGENT,
-                locale="vi-VN",
+            future = asyncio.run_coroutine_threadsafe(
+                self._async_fetch(url, cookies), self.loop
             )
-            context.add_cookies(cookies)
-            page = context.new_page()
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
-                page.wait_for_timeout(1500)
-                html = page.content()
-                title = page.title()
+                html, title = future.result(timeout=PLAYWRIGHT_NAV_TIMEOUT / 1000 + 10)
                 return html, None, title
             except Exception as exc:
                 return None, f"Lỗi trình duyệt: {exc}", None
-            finally:
-                context.close()
+
+    def _run_loop(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._async_start())
+        except Exception as exc:
+            self.error = f"Lỗi Playwright: {exc}"
+            self.ready.set()
+            return
+        self.ready.set()
+        self.loop.run_forever()
+
+    async def _async_start(self) -> None:
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(headless=True)
+
+    async def _async_fetch(self, url: str, cookies: List[Dict[str, Any]]) -> Tuple[str, str]:
+        context = await self.browser.new_context(
+            user_agent=USER_AGENT,
+            locale="vi-VN",
+        )
+        await context.add_cookies(cookies)
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
+            await page.wait_for_timeout(1500)
+            html = await page.content()
+            title = await page.title()
+            return html, title
+        finally:
+            await context.close()
+
+    async def _async_stop(self) -> None:
+        if self.browser:
+            await self.browser.close()
+            self.browser = None
+        if self.playwright:
+            await self.playwright.stop()
+            self.playwright = None
 
 
 def check_page_with_cookie(page_url: str, cookie_value: str) -> CheckResult:
