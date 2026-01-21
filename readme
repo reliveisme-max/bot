@@ -1,1 +1,39 @@
-re
+Bot Tich Xanh
+=============
+
+Single-file Telegram bot stored in `bot.py`.
+The bot checks Facebook page verification (tích xanh) using cookies
+and supports quick check + auto watch (30–60s).
+
+Features
+--------
+- Check nhanh (1 lần)
+- Theo dõi tự động, báo khi có tích
+- Quản lý user và cookie (admin)
+
+Quick start
+-----------
+1) Set environment variables:
+   export TELEGRAM_BOT_TOKEN="YOUR_TOKEN"
+   export BOT_ADMIN_IDS="123456789"
+
+2) Install Selenium (required for browser automation):
+   pip install selenium
+
+3) Install ChromeDriver:
+   - Download ChromeDriver that matches your Chrome version
+   - Set CHROMEDRIVER_PATH to the driver path (optional if Selenium Manager works)
+
+4) Run the bot:
+   python bot.py
+
+State file
+----------
+The bot stores state in: data/state.json
+You can override it with:
+   export BOT_STATE_PATH="/path/to/state.json"
+
+Browser settings
+----------------
+- CHROMEDRIVER_PATH: path to chromedriver.exe
+- SELENIUM_HEADLESS: set to 0 to show browser UI

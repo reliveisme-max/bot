@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.venv/
+data/requests.json
+data/state.json
