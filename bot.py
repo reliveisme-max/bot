@@ -23,11 +23,26 @@ CHECK_INTERVAL_MIN = 30
 CHECK_INTERVAL_MAX = 60
 WATCH_EXPIRE_DAYS = 7
 HTTP_TIMEOUT = 20
+PLAYWRIGHT_NAV_TIMEOUT = 30000
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
 )
+
+USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+try:
+    from playwright.sync_api import sync_playwright
+
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    sync_playwright = None
+    PLAYWRIGHT_AVAILABLE = False
 
 DEFAULT_STATE: Dict[str, Any] = {
     "users": {},
@@ -86,6 +101,30 @@ def normalize_facebook_url(url: str, host: str) -> Optional[str]:
     path = parsed.path or "/"
     query = parsed.query
     return parse.urlunparse(("https", host, path, "", query, ""))
+
+
+def parse_cookie_header(cookie_value: str) -> List[Dict[str, Any]]:
+    cookies: List[Dict[str, Any]] = []
+    if not cookie_value:
+        return cookies
+    for part in cookie_value.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": ".facebook.com",
+                "path": "/",
+            }
+        )
+    return cookies
 
 
 def http_get(url: str, cookie_value: str) -> Tuple[Optional[str], Optional[str]]:
@@ -168,12 +207,143 @@ def detect_verified(html: str) -> Optional[bool]:
     return None
 
 
+def check_page_with_browser(
+    page_url: str, cookie_value: str, browser: BrowserSession
+) -> CheckResult:
+    candidates = []
+    for host in ("m.facebook.com", "mbasic.facebook.com"):
+        normalized = normalize_facebook_url(page_url, host)
+        if normalized:
+            candidates.append(normalized)
+
+    best_unknown: Optional[CheckResult] = None
+    for candidate in candidates:
+        html, err, title = browser.fetch_html(candidate, cookie_value)
+        if err:
+            best_unknown = CheckResult(
+                status="unknown",
+                reason=err,
+                page_name=None,
+                cookie_ok=None,
+            )
+            continue
+        if not html:
+            best_unknown = CheckResult(
+                status="unknown",
+                reason="Không thể tải trang",
+                page_name=None,
+                cookie_ok=None,
+            )
+            continue
+
+        page_name = extract_title(html) or title
+        if title and title.lower() in {"log in", "login", "facebook"}:
+            return CheckResult(
+                status="unknown",
+                reason="Login wall / cookie hết hạn",
+                page_name=page_name,
+                cookie_ok=False,
+            )
+        if is_login_wall(html):
+            return CheckResult(
+                status="unknown",
+                reason="Login wall / cookie hết hạn",
+                page_name=page_name,
+                cookie_ok=False,
+            )
+
+        verdict = detect_verified(html)
+        if verdict is True:
+            return CheckResult(
+                status="verified",
+                page_name=page_name,
+                cookie_ok=True,
+            )
+        if verdict is False:
+            return CheckResult(
+                status="not_verified",
+                page_name=page_name,
+                cookie_ok=True,
+            )
+
+        best_unknown = CheckResult(
+            status="unknown",
+            reason="Không đủ dữ liệu",
+            page_name=page_name,
+            cookie_ok=True,
+        )
+
+    return best_unknown or CheckResult(
+        status="unknown",
+        reason="Không thể tải trang",
+        page_name=None,
+        cookie_ok=True,
+    )
+
+
 @dataclass
 class CheckResult:
     status: str
     reason: Optional[str] = None
     page_name: Optional[str] = None
     cookie_ok: Optional[bool] = None
+
+
+class BrowserSession:
+    def __init__(self) -> None:
+        self.playwright = None
+        self.browser = None
+        self.lock = threading.Lock()
+
+    def start(self) -> Optional[str]:
+        if not PLAYWRIGHT_AVAILABLE:
+            return (
+                "Thiếu Playwright. Cài: pip install playwright "
+                "và python -m playwright install chromium"
+            )
+        if self.browser:
+            return None
+        try:
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(headless=True)
+            return None
+        except Exception as exc:
+            self.playwright = None
+            self.browser = None
+            return f"Lỗi Playwright: {exc}"
+
+    def stop(self) -> None:
+        if self.browser:
+            self.browser.close()
+            self.browser = None
+        if self.playwright:
+            self.playwright.stop()
+            self.playwright = None
+
+    def fetch_html(self, url: str, cookie_value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        error = self.start()
+        if error:
+            return None, error, None
+        cookies = parse_cookie_header(cookie_value)
+        if not cookies:
+            return None, "Cookie trống", None
+        with self.lock:
+            context = self.browser.new_context(
+                user_agent=USER_AGENT,
+                locale="vi-VN",
+            )
+            context.add_cookies(cookies)
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
+                page.wait_for_timeout(1500)
+                html = page.content()
+                title = page.title()
+                return html, None, title
+            except Exception as exc:
+                return None, f"Lỗi trình duyệt: {exc}", None
+            finally:
+                context.close()
 
 
 def check_page_with_cookie(page_url: str, cookie_value: str) -> CheckResult:
@@ -662,7 +832,7 @@ def select_cookie(store: StateStore) -> List[Tuple[str, Dict[str, Any]]]:
 
 
 def run_check_with_rotation(
-    store: StateStore, page_url: str
+    store: StateStore, page_url: str, browser: Optional[BrowserSession]
 ) -> Tuple[CheckResult, Optional[str]]:
     cookies = select_cookie(store)
     if not cookies:
@@ -675,8 +845,25 @@ def run_check_with_rotation(
             None,
         )
 
+    if USE_PLAYWRIGHT and not PLAYWRIGHT_AVAILABLE:
+        return (
+            CheckResult(
+                status="unknown",
+                reason=(
+                    "Thiếu Playwright. Cài: pip install playwright "
+                    "và python -m playwright install chromium"
+                ),
+                cookie_ok=None,
+            ),
+            None,
+        )
+
     for cookie_id, cookie in cookies:
-        result = check_page_with_cookie(page_url, cookie.get("value", ""))
+        cookie_value = cookie.get("value", "")
+        if USE_PLAYWRIGHT and browser is not None:
+            result = check_page_with_browser(page_url, cookie_value, browser)
+        else:
+            result = check_page_with_cookie(page_url, cookie_value)
         if result.cookie_ok is False:
             store.mark_cookie_dead(cookie_id)
             continue
@@ -698,55 +885,60 @@ def check_worker(
     task_queue: queue.Queue,
     stop_event: threading.Event,
 ) -> None:
-    while not stop_event.is_set():
-        try:
-            task: CheckTask = task_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-
-        result, cookie_id = run_check_with_rotation(store, task.page_url)
-
-        if task.kind == "quick":
-            message = format_quick_result(result, None, task.page_url)
-            client.send_message(task.chat_id, message)
-            continue
-
-        if task.kind == "watch" and task.watch_id:
-            watch = store.get_watch(task.watch_id)
-            if not watch:
-                continue
-            updates = {
-                "last_checked_at": now_ts(),
-                "last_result": result.status,
-                "last_error": result.reason,
-                "cookie_id": cookie_id,
-            }
-            if result.page_name and not watch.get("page_name"):
-                updates["page_name"] = result.page_name
-            if result.status == "verified":
-                updates["status"] = "verified"
-                updates["verified_at"] = now_ts()
-                store.update_watch(task.watch_id, updates)
-                watch.update(updates)
-                client.send_message(task.chat_id, format_watch_verified(watch))
+    browser = BrowserSession() if USE_PLAYWRIGHT else None
+    try:
+        while not stop_event.is_set():
+            try:
+                task: CheckTask = task_queue.get(timeout=1)
+            except queue.Empty:
                 continue
 
-            if result.status == "unknown" and result.cookie_ok is False:
-                if not watch.get("error_notified_at"):
-                    updates["error_notified_at"] = now_ts()
+            result, cookie_id = run_check_with_rotation(store, task.page_url, browser)
+
+            if task.kind == "quick":
+                message = format_quick_result(result, None, task.page_url)
+                client.send_message(task.chat_id, message)
+                continue
+
+            if task.kind == "watch" and task.watch_id:
+                watch = store.get_watch(task.watch_id)
+                if not watch:
+                    continue
+                updates = {
+                    "last_checked_at": now_ts(),
+                    "last_result": result.status,
+                    "last_error": result.reason,
+                    "cookie_id": cookie_id,
+                }
+                if result.page_name and not watch.get("page_name"):
+                    updates["page_name"] = result.page_name
+                if result.status == "verified":
+                    updates["status"] = "verified"
+                    updates["verified_at"] = now_ts()
                     store.update_watch(task.watch_id, updates)
                     watch.update(updates)
-                    client.send_message(
-                        task.chat_id,
-                        "⚠️ KHÔNG THỂ XÁC MINH\n"
-                        "Lý do: Cookie die / hệ thống chưa sẵn sàng\n"
-                        "👉 Vui lòng liên hệ admin để xử lý.",
-                    )
-                else:
-                    store.update_watch(task.watch_id, updates)
-                continue
+                    client.send_message(task.chat_id, format_watch_verified(watch))
+                    continue
 
-            store.update_watch(task.watch_id, updates)
+                if result.status == "unknown" and result.cookie_ok is False:
+                    if not watch.get("error_notified_at"):
+                        updates["error_notified_at"] = now_ts()
+                        store.update_watch(task.watch_id, updates)
+                        watch.update(updates)
+                        client.send_message(
+                            task.chat_id,
+                            "⚠️ KHÔNG THỂ XÁC MINH\n"
+                            "Lý do: Cookie die / hệ thống chưa sẵn sàng\n"
+                            "👉 Vui lòng liên hệ admin để xử lý.",
+                        )
+                    else:
+                        store.update_watch(task.watch_id, updates)
+                    continue
+
+                store.update_watch(task.watch_id, updates)
+    finally:
+        if browser:
+            browser.stop()
 
 
 def handle_expired_watches(

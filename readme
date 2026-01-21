@@ -17,7 +17,11 @@ Quick start
    export TELEGRAM_BOT_TOKEN="YOUR_TOKEN"
    export BOT_ADMIN_IDS="123456789"
 
-2) Run the bot:
+2) Install Playwright (required for browser automation):
+   pip install playwright
+   python -m playwright install chromium
+
+3) Run the bot:
    python bot.py
 
 State file
