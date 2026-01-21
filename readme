@@ -17,11 +17,14 @@ Quick start
    export TELEGRAM_BOT_TOKEN="YOUR_TOKEN"
    export BOT_ADMIN_IDS="123456789"
 
-2) Install Playwright (required for browser automation):
-   pip install playwright
-   python -m playwright install chromium
+2) Install Selenium (required for browser automation):
+   pip install selenium
 
-3) Run the bot:
+3) Install ChromeDriver:
+   - Download ChromeDriver that matches your Chrome version
+   - Set CHROMEDRIVER_PATH to the driver path (optional if Selenium Manager works)
+
+4) Run the bot:
    python bot.py
 
 State file
@@ -29,3 +32,8 @@ State file
 The bot stores state in: data/state.json
 You can override it with:
    export BOT_STATE_PATH="/path/to/state.json"
+
+Browser settings
+----------------
+- CHROMEDRIVER_PATH: path to chromedriver.exe
+- SELENIUM_HEADLESS: set to 0 to show browser UI

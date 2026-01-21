@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import queue
@@ -24,26 +23,33 @@ CHECK_INTERVAL_MIN = 30
 CHECK_INTERVAL_MAX = 60
 WATCH_EXPIRE_DAYS = 7
 HTTP_TIMEOUT = 20
-PLAYWRIGHT_NAV_TIMEOUT = 30000
+BROWSER_NAV_TIMEOUT = 30
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
 )
 
-USE_PLAYWRIGHT = os.environ.get("USE_PLAYWRIGHT", "1").strip().lower() not in (
+USE_SELENIUM = os.environ.get("USE_SELENIUM", "1").strip().lower() not in (
     "0",
     "false",
     "no",
 )
 
 try:
-    from playwright.async_api import async_playwright
+    from selenium import webdriver
+    from selenium.common.exceptions import InvalidCookieDomainException, WebDriverException
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
 
-    PLAYWRIGHT_AVAILABLE = True
+    SELENIUM_AVAILABLE = True
 except Exception:
-    async_playwright = None
-    PLAYWRIGHT_AVAILABLE = False
+    webdriver = None
+    Options = None
+    Service = None
+    InvalidCookieDomainException = Exception
+    WebDriverException = Exception
+    SELENIUM_AVAILABLE = False
 
 DEFAULT_STATE: Dict[str, Any] = {
     "users": {},
@@ -121,7 +127,6 @@ def parse_cookie_header(cookie_value: str) -> List[Dict[str, Any]]:
             {
                 "name": name,
                 "value": value,
-                "domain": ".facebook.com",
                 "path": "/",
             }
         )
@@ -292,40 +297,48 @@ class CheckResult:
 
 class BrowserSession:
     def __init__(self) -> None:
-        self.playwright = None
-        self.browser = None
+        self.driver = None
         self.lock = threading.Lock()
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.thread: Optional[threading.Thread] = None
-        self.ready = threading.Event()
-        self.error: Optional[str] = None
 
     def start(self) -> Optional[str]:
-        if not PLAYWRIGHT_AVAILABLE:
-            return (
-                "Thiếu Playwright. Cài: pip install playwright "
-                "và python -m playwright install chromium"
-            )
-        if self.thread and self.thread.is_alive():
-            self.ready.wait(timeout=10)
-            return self.error
-        self.thread = threading.Thread(target=self._run_loop, daemon=True)
-        self.thread.start()
-        self.ready.wait(timeout=15)
-        return self.error
+        if not SELENIUM_AVAILABLE:
+            return "Thiếu Selenium. Cài: pip install selenium"
+        if self.driver:
+            return None
+        try:
+            options = Options()
+            if os.environ.get("SELENIUM_HEADLESS", "1").strip().lower() not in (
+                "0",
+                "false",
+                "no",
+            ):
+                options.add_argument("--headless")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--window-size=1280,720")
+            options.add_argument(f"--user-agent={USER_AGENT}")
+            options.add_argument("--lang=vi-VN")
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            driver_path = os.environ.get("CHROMEDRIVER_PATH")
+            if driver_path:
+                service = Service(driver_path)
+                self.driver = webdriver.Chrome(service=service, options=options)
+            else:
+                self.driver = webdriver.Chrome(options=options)
+            self.driver.set_page_load_timeout(BROWSER_NAV_TIMEOUT)
+            return None
+        except Exception as exc:
+            self.driver = None
+            return f"Lỗi Selenium: {exc}"
 
     def stop(self) -> None:
-        if self.loop and self.loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._async_stop(), self.loop)
+        if self.driver:
             try:
-                future.result(timeout=10)
+                self.driver.quit()
             except Exception:
                 pass
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5)
-        self.thread = None
-        self.loop = None
+            self.driver = None
 
     def fetch_html(
         self, url: str, cookie_value: str
@@ -336,57 +349,22 @@ class BrowserSession:
         cookies = parse_cookie_header(cookie_value)
         if not cookies:
             return None, "Cookie trống", None
-        if not self.loop:
-            return None, "Playwright chưa sẵn sàng", None
         with self.lock:
-            future = asyncio.run_coroutine_threadsafe(
-                self._async_fetch(url, cookies), self.loop
-            )
             try:
-                html, title = future.result(timeout=PLAYWRIGHT_NAV_TIMEOUT / 1000 + 10)
+                self.driver.get("https://m.facebook.com")
+                self.driver.delete_all_cookies()
+                for cookie in cookies:
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except InvalidCookieDomainException:
+                        continue
+                self.driver.get(url)
+                time.sleep(1.5)
+                html = self.driver.page_source
+                title = self.driver.title
                 return html, None, title
-            except Exception as exc:
-                return None, f"Lỗi trình duyệt: {exc}", None
-
-    def _run_loop(self) -> None:
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._async_start())
-        except Exception as exc:
-            self.error = f"Lỗi Playwright: {exc}"
-            self.ready.set()
-            return
-        self.ready.set()
-        self.loop.run_forever()
-
-    async def _async_start(self) -> None:
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
-
-    async def _async_fetch(self, url: str, cookies: List[Dict[str, Any]]) -> Tuple[str, str]:
-        context = await self.browser.new_context(
-            user_agent=USER_AGENT,
-            locale="vi-VN",
-        )
-        await context.add_cookies(cookies)
-        page = await context.new_page()
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
-            await page.wait_for_timeout(1500)
-            html = await page.content()
-            title = await page.title()
-            return html, title
-        finally:
-            await context.close()
-
-    async def _async_stop(self) -> None:
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-        if self.playwright:
-            await self.playwright.stop()
-            self.playwright = None
+            except WebDriverException as exc:
+                return None, f"Lỗi Selenium: {exc}", None
 
 
 def check_page_with_cookie(page_url: str, cookie_value: str) -> CheckResult:
@@ -888,14 +866,11 @@ def run_check_with_rotation(
             None,
         )
 
-    if USE_PLAYWRIGHT and not PLAYWRIGHT_AVAILABLE:
+    if USE_SELENIUM and not SELENIUM_AVAILABLE:
         return (
             CheckResult(
                 status="unknown",
-                reason=(
-                    "Thiếu Playwright. Cài: pip install playwright "
-                    "và python -m playwright install chromium"
-                ),
+                reason="Thiếu Selenium. Cài: pip install selenium",
                 cookie_ok=None,
             ),
             None,
@@ -903,7 +878,7 @@ def run_check_with_rotation(
 
     for cookie_id, cookie in cookies:
         cookie_value = cookie.get("value", "")
-        if USE_PLAYWRIGHT and browser is not None:
+        if USE_SELENIUM and browser is not None:
             result = check_page_with_browser(page_url, cookie_value, browser)
         else:
             result = check_page_with_cookie(page_url, cookie_value)
@@ -928,7 +903,7 @@ def check_worker(
     task_queue: queue.Queue,
     stop_event: threading.Event,
 ) -> None:
-    browser = BrowserSession() if USE_PLAYWRIGHT else None
+    browser = BrowserSession() if USE_SELENIUM else None
     try:
         while not stop_event.is_set():
             try:
