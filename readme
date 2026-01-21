@@ -1,1 +1,31 @@
-re
+Bot Tich Xanh
+=============
+
+Lightweight "blue check" bot for managing verification requests.
+The bot runs as a CLI and stores requests in a JSON file.
+
+Features
+--------
+- Create verification requests
+- Approve or reject requests
+- Check status for a user
+- List requests by status
+
+Quick start
+-----------
+1) Create a request:
+   python -m blue_check_bot request alice "Alice Example" "Public figure"
+
+2) Approve a request:
+   python -m blue_check_bot approve alice --by admin --reason "Verified identity"
+
+3) Check status:
+   python -m blue_check_bot status alice
+
+4) List pending requests:
+   python -m blue_check_bot list --status pending
+
+State file
+----------
+The default state file is: data/requests.json
+You can override it with --state.
